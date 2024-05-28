@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const lib = b.addStaticLibrary(.{
-        .name = "quickjs",
+        .name = "zquickjs",
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
