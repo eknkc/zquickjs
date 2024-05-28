@@ -3,32 +3,61 @@ const QuickJS = @import("quickjs.zig");
 
 pub const ValueType = enum { Bool, Number, String, Symbol, Object, Promise, Array, Function, Exception, Null, Undefined, Uninitialized };
 
-pub const Value = union(ValueType) {
-    Bool: bool,
-    Number: union {
-        Int: i64,
-        Float: f64,
-    },
-    String: Mapped([]const u8),
-    Symbol,
-    Object: Object,
-    Promise: Promise,
-    Array: Object,
-    Function: Function,
-    Exception,
-    Null,
-    Undefined,
-    Uninitialized,
+pub const Value = struct {
+    ctx: ?*QuickJS.JSContext,
+    value: QuickJS.JSValue,
+
+    pub fn init(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) Value {
+        return Value{ .ctx = ctx, .value = value };
+    }
+
+    /// Deinitialize the value and release allocated resources.
+    pub fn deinit(self: Function) void {
+        QuickJS.FreeValue(self.ctx, self.value);
+    }
+
+    /// Get the underlying type of the value.
+    pub fn getType(self: Value) ValueType {
+        return getValueType(self.ctx, self.value);
+    }
+
+    /// Returns the value as a specific type.
+    /// If the value is not compatible with the type, an error is returned.
+    /// If the value requires allocation (structs, strings etc), an error is returned. Use `asAlloc` or `asBuf` instead.
+    pub fn as(self: Value, comptime T: type) !T {
+        const mapped = try fromJSValueAlloc(T, false, null, self.ctx, self.value);
+        return mapped.value;
+    }
+
+    /// Returns the value as a specific type.
+    /// If the value is not compatible with the type, an error is returned.
+    /// The returned type has a `deinit` method that must be called to free the allocated memory.
+    pub fn asAlloc(self: Value, comptime T: type) !Mapped(T) {
+        return fromJSValueAlloc(T, true, null, self.ctx, self.value);
+    }
+
+    /// Returns the value as a specific type.
+    /// If the value is not compatible with the type, an error is returned.
+    /// The returned type uses the provided buffer to allocate memory.
+    pub fn asBuf(self: Value, comptime T: type, buf: []u8) !Mapped(T) {
+        const alloc = std.heap.FixedBufferAllocator.init(buf);
+        const mapped = try fromJSValueAlloc(T, true, alloc.allocator(), self.ctx, self.value);
+        return mapped.value;
+    }
 };
 
 pub const Function = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
 
+    /// Deinitialize the value and release allocated resources.
     pub fn deinit(self: Function) void {
-        QuickJS.JS_FreeValue(self.ctx, self.value);
+        QuickJS.FreeValue(self.ctx, self.value);
     }
 
+    /// Call the function with the provided arguments.
+    /// The return type must be provided as a comptime parameter.
+    /// Return type can be `Value` or any other type that can be mapped from a JS value.
     pub fn call(self: Function, comptime ReturnType: type, args: anytype) !Mapped(ReturnType) {
         const ti = @typeInfo(@TypeOf(args));
 
@@ -40,22 +69,22 @@ pub const Function = struct {
 
         defer inline for (values) |v| {
             if (QuickJS.JS_IsUndefined(v) == 0) {
-                QuickJS.JS_FreeValue(self.ctx, v);
+                QuickJS.FreeValue(self.ctx, v);
             }
         };
 
         inline for (args, 0..) |arg, i| {
-            values[i] = try toValue(self.ctx, arg);
+            values[i] = try toJSValue(self.ctx, arg);
         }
 
         const ret = QuickJS.JS_Call(self.ctx, self.value, QuickJS.UNDEFINED, values.len, @ptrCast(&values));
-        defer QuickJS.JS_FreeValue(self.ctx, ret);
+        defer QuickJS.FreeValue(self.ctx, ret);
 
         if (QuickJS.JS_IsException(ret) != 0) {
             return error.Exception;
         }
 
-        return fromValueAlloc(ReturnType, QuickJS.getAllocator(self.ctx), self.ctx, ret);
+        return fromJSValueAlloc(ReturnType, true, null, self.ctx, ret);
     }
 };
 
@@ -63,14 +92,39 @@ pub const Object = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
 
-    pub fn deinit(self: Object) void {
-        QuickJS.JS_FreeValue(self.ctx, self.value);
+    pub fn init(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) Object {
+        return Object{ .ctx = ctx, .value = value };
     }
 
-    pub fn keys(self: Object) !std.ArrayList([]const u8) {
-        var arr = std.ArrayList([]const u8).init(QuickJS.getAllocator(self.ctx));
-        errdefer arr.deinit();
+    pub fn deinit(self: Object) void {
+        QuickJS.FreeValue(self.ctx, self.value);
+    }
 
+    const KeysIterator = struct {
+        obj: Object,
+        index: u32 = 0,
+        count: u32,
+        ptab: [*c]QuickJS.JSPropertyEnum,
+
+        pub fn deinit(self: KeysIterator) void {
+            QuickJS.js_free(self.obj.ctx, self.ptab);
+        }
+
+        pub fn next(self: *KeysIterator) ?[]const u8 {
+            if (self.index >= self.count) {
+                return null;
+            }
+
+            const name = QuickJS.JS_AtomToCString(self.obj.ctx, self.ptab[self.index].atom);
+            defer QuickJS.JS_FreeCString(self.obj.ctx, name);
+
+            self.index += 1;
+
+            return std.mem.span(name);
+        }
+    };
+
+    pub fn keys(self: Object) !KeysIterator {
         var count: u32 = 0;
         var ptab: [*c]QuickJS.JSPropertyEnum = undefined;
 
@@ -80,13 +134,7 @@ pub const Object = struct {
             return error.UnableToGetProperties;
         }
 
-        for (0..count) |i| {
-            const name = QuickJS.JS_AtomToCString(self.ctx, ptab[i].atom);
-            defer QuickJS.JS_FreeCString(self.ctx, name);
-            try arr.append(std.mem.span(name));
-        }
-
-        return arr;
+        return KeysIterator{ .obj = self, .count = count, .ptab = ptab };
     }
 
     pub fn hasProperty(self: Object, key: []const u8) !bool {
@@ -100,20 +148,17 @@ pub const Object = struct {
         return QuickJS.JS_HasProperty(self.ctx, self.value, atom) != 0;
     }
 
-    pub fn getProperty(self: Object, comptime T: type, key: []const u8) !Mapped(T) {
+    pub fn getProperty(self: Object, key: []const u8) !Value {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
         defer allocator.free(ckey);
 
-        const val = QuickJS.JS_GetPropertyStr(self.ctx, self.value, ckey.ptr);
-        defer QuickJS.JS_FreeValue(self.ctx, val);
-
-        return fromValueAlloc(T, QuickJS.getAllocator(self.ctx), self.ctx, val);
+        return Value.init(self.ctx, QuickJS.JS_GetPropertyStr(self.ctx, self.value, ckey.ptr));
     }
 
     pub fn setProperty(self: Object, key: []const u8, value: anytype) !void {
-        const val = try toValue(self.ctx, value);
-        errdefer QuickJS.JS_FreeValue(self.ctx, val);
+        const val = try toJSValue(self.ctx, value);
+        errdefer QuickJS.FreeValue(self.ctx, val);
 
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
@@ -147,7 +192,7 @@ pub const Promise = struct {
     value: QuickJS.JSValue,
 
     pub fn deinit(self: Promise) void {
-        QuickJS.JS_FreeValue(self.ctx, self.value);
+        QuickJS.FreeValue(self.ctx, self.value);
     }
 };
 
@@ -168,19 +213,19 @@ pub fn Mapped(comptime T: type) type {
     };
 }
 
-pub fn toValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSValue {
+fn toJSValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSValue {
     return switch (@typeInfo(@TypeOf(value))) {
         .Bool => QuickJS.JS_NewBool(ctx, @intFromBool(value)),
         .Float, .ComptimeFloat => QuickJS.JS_NewFloat64(ctx, @floatCast(value)),
         .Int, .ComptimeInt => QuickJS.JS_NewInt64(ctx, std.math.cast(i64, value) orelse return MappingError.IntIncompatible),
-        .Array => toValue(ctx, value[0..]),
+        .Array => toJSValue(ctx, value[0..]),
         .Pointer => |ptr| switch (ptr.size) {
             .One => switch (@typeInfo(ptr.child)) {
                 .Array => {
                     const Slice = []const std.meta.Elem(ptr.child);
-                    return toValue(ctx, @as(Slice, value));
+                    return toJSValue(ctx, @as(Slice, value));
                 },
-                else => toValue(ctx, value.*),
+                else => toJSValue(ctx, value.*),
             },
             .Slice => {
                 if (ptr.child == u8) {
@@ -188,17 +233,17 @@ pub fn toValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JS
                 }
 
                 const jsarray = QuickJS.JS_NewArray(ctx);
-                errdefer QuickJS.JS_FreeValue(ctx, jsarray);
+                errdefer QuickJS.FreeValue(ctx, jsarray);
 
                 const push = QuickJS.JS_GetPropertyStr(ctx, jsarray, "push");
-                defer QuickJS.JS_FreeValue(ctx, push);
+                defer QuickJS.FreeValue(ctx, push);
 
                 for (value) |arrvalue| {
-                    var pushvalue = try toValue(ctx, arrvalue);
-                    defer QuickJS.JS_FreeValue(ctx, pushvalue);
+                    var pushvalue = try toJSValue(ctx, arrvalue);
+                    defer QuickJS.FreeValue(ctx, pushvalue);
 
                     const res = QuickJS.JS_Call(ctx, push, jsarray, 1, @ptrCast(&pushvalue));
-                    defer QuickJS.JS_FreeValue(ctx, res);
+                    defer QuickJS.FreeValue(ctx, res);
                 }
 
                 return jsarray;
@@ -207,13 +252,13 @@ pub fn toValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JS
         },
         .Struct => |st| {
             const jsobj = QuickJS.JS_NewObject(ctx);
-            errdefer QuickJS.JS_FreeValue(ctx, jsobj);
+            errdefer QuickJS.FreeValue(ctx, jsobj);
 
             inline for (st.fields) |field| {
                 const name = field.name;
                 const fieldvalue = @field(value, name);
 
-                const pushvalue = try toValue(ctx, fieldvalue);
+                const pushvalue = try toJSValue(ctx, fieldvalue);
 
                 _ = QuickJS.JS_SetPropertyStr(ctx, jsobj, name, pushvalue);
             }
@@ -245,14 +290,14 @@ pub fn toValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JS
                     const allocator = arena.allocator();
 
                     inline for (types, 0..) |t, i| {
-                        const arg = fromValueAlloc(t, allocator, c, values[i]) catch unreachable;
+                        const arg = fromJSValueAlloc(t, allocator, c, values[i]) catch unreachable;
                         @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = arg.value;
                     }
 
                     const ret = @call(.auto, value, arg_tuple);
 
                     if (func.return_type != null) {
-                        return toValue(c, ret) catch unreachable;
+                        return toJSValue(c, ret) catch unreachable;
                     }
 
                     return QuickJS.UNDEFINED;
@@ -265,21 +310,29 @@ pub fn toValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JS
     };
 }
 
-pub fn fromValue(comptime T: type, ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) !Mapped(T) {
-    return fromValueAlloc(T, QuickJS.getAllocator(ctx), ctx, value);
-}
-
-pub fn fromValueAlloc(comptime T: type, allocator: std.mem.Allocator, ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) !Mapped(T) {
+fn fromJSValueAlloc(comptime T: type, comptime allocate: bool, allocator: ?std.mem.Allocator, ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) !Mapped(T) {
     if (T == void) {
         return Mapped(void){ .value = {} };
     }
 
     switch (T) {
+        Value => {
+            return Mapped(T){ .value = Value{
+                .ctx = ctx,
+                .value = QuickJS.DupValue(ctx, value),
+            } };
+        },
         Function => {
-            return if (QuickJS.JS_IsFunction(ctx, value) != 0) Mapped(T){ .value = Function{ .ctx = ctx, .value = value } } else MappingError.CanNotConvert;
+            return if (QuickJS.JS_IsFunction(ctx, value) != 0) Mapped(T){ .value = Function{
+                .ctx = ctx,
+                .value = QuickJS.DupValue(ctx, value),
+            } } else MappingError.CanNotConvert;
         },
         Object => {
-            return if (QuickJS.JS_IsObject(value) != 0) Mapped(T){ .value = Object{ .ctx = ctx, .value = value } } else MappingError.CanNotConvert;
+            return if (QuickJS.JS_IsObject(value) != 0) Mapped(T){ .value = Object{
+                .ctx = ctx,
+                .value = QuickJS.DupValue(ctx, value),
+            } } else MappingError.CanNotConvert;
         },
         else => switch (@typeInfo(T)) {
             .Bool => QuickJS.JS_ToBool(ctx, value) != 0,
@@ -306,10 +359,15 @@ pub fn fromValueAlloc(comptime T: type, allocator: std.mem.Allocator, ctx: ?*Qui
         },
     }
 
-    const arena = try allocator.create(std.heap.ArenaAllocator);
-    errdefer allocator.destroy(arena);
+    if (!allocate) {
+        return MappingError.NeedsAllocator;
+    }
 
-    arena.* = std.heap.ArenaAllocator.init(allocator);
+    const alloc = allocator orelse QuickJS.getAllocator(ctx);
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    errdefer alloc.destroy(arena);
+
+    arena.* = std.heap.ArenaAllocator.init(alloc);
 
     if (T == []u8 or T == []const u8) {
         const str = QuickJS.JS_ToCString(ctx, value);
@@ -322,7 +380,7 @@ pub fn fromValueAlloc(comptime T: type, allocator: std.mem.Allocator, ctx: ?*Qui
     }
 
     const val = QuickJS.JS_JSONStringify(ctx, value, QuickJS.UNDEFINED, QuickJS.UNDEFINED);
-    defer QuickJS.JS_FreeValue(ctx, val);
+    defer QuickJS.FreeValue(ctx, val);
 
     const str = QuickJS.JS_ToCString(ctx, val);
     defer QuickJS.JS_FreeCString(ctx, str);
@@ -332,7 +390,7 @@ pub fn fromValueAlloc(comptime T: type, allocator: std.mem.Allocator, ctx: ?*Qui
     return Mapped(T){ .value = res, .arena = arena };
 }
 
-pub fn getValueType(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) ValueType {
+fn getValueType(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) ValueType {
     if (QuickJS.JS_IsNumber(value) != 0 or QuickJS.JS_IsBigInt(value) != 0 or QuickJS.JS_IsBigFloat(value) != 0) {
         return .Number;
     } else if (QuickJS.JS_IsString(value) != 0) {

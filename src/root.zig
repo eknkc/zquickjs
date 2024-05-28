@@ -1,10 +1,11 @@
-const std = @import("std");
-const testing = std.testing;
+const runtime = @import("runtime.zig");
+const mapping = @import("mapping.zig");
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+pub const Runtime = runtime.Runtime;
+pub const Context = runtime.Context;
 
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
-}
+pub const Value = mapping.Value;
+pub const ValueType = mapping.ValueType;
+pub const Object = mapping.Object;
+pub const Function = mapping.Function;
+pub const Promise = mapping.Promise;

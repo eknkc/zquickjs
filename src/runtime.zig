@@ -1,7 +1,7 @@
 const std = @import("std");
 const mapping = @import("mapping.zig");
 const QuickJS = @import("quickjs.zig");
-const native_endian = @import("builtin").target.cpu.arch.endian();
+const AllocContext = @import("alloc.zig");
 
 const RuntimeError = error{UnableToInitialize};
 
@@ -33,84 +33,8 @@ fn initmodule(ctx: ?*QuickJS.JSContext, module: ?*QuickJS.JSModuleDef) callconv(
     return 0;
 }
 
-const AllocContext = struct {
-    allocator: std.mem.Allocator,
-    allocations: std.AutoHashMap(usize, usize),
-    functions: QuickJS.JSMallocFunctions,
-
-    const HEADER_SIZE: usize = 16;
-
-    pub fn deinit(self: *AllocContext) void {
-        self.allocations.deinit();
-        self.allocator.destroy(self);
-    }
-
-    pub fn malloc(st: [*c]QuickJS.JSMallocState, size: usize) callconv(.C) ?*anyopaque {
-        if (size == 0 or st.*.malloc_size + size > st.*.malloc_limit) {
-            return null;
-        }
-
-        var context: *AllocContext = @ptrCast(@alignCast(st.*.@"opaque"));
-
-        const allocated = context.allocator.alloc(u8, size + HEADER_SIZE) catch return null;
-        std.mem.writeInt(usize, allocated[0..@sizeOf(usize)], allocated.len, native_endian);
-
-        st.*.malloc_count += 1;
-        st.*.malloc_size += allocated.len;
-
-        return allocated[HEADER_SIZE..].ptr;
-    }
-
-    pub fn realloc(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque, size: usize) callconv(.C) ?*anyopaque {
-        var context: *AllocContext = @ptrCast(@alignCast(st.*.@"opaque"));
-
-        if (ptr == null) {
-            return malloc(st, size);
-        }
-
-        const allocated: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - HEADER_SIZE);
-        const allocatedsize = std.mem.readInt(usize, allocated[0..@sizeOf(usize)], native_endian);
-
-        if (size == 0) {
-            free(st, ptr);
-            return null;
-        }
-
-        if (st.*.malloc_size - allocatedsize + size + HEADER_SIZE > st.*.malloc_limit) {
-            return null;
-        }
-
-        const newp = context.allocator.realloc(allocated[0..allocatedsize], size + HEADER_SIZE) catch return null;
-        std.mem.writeInt(usize, newp[0..@sizeOf(usize)], newp.len, native_endian);
-
-        st.*.malloc_size += newp.len;
-        st.*.malloc_size -= allocatedsize;
-
-        return newp[HEADER_SIZE..].ptr;
-    }
-
-    pub fn free(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque) callconv(.C) void {
-        var context: *AllocContext = @ptrCast(@alignCast(st.*.@"opaque"));
-
-        if (ptr) |p| {
-            const allocated: [*]u8 = @ptrFromInt(@intFromPtr(p) - HEADER_SIZE);
-            const size = std.mem.readInt(usize, allocated[0..@sizeOf(usize)], native_endian);
-
-            context.allocator.free(allocated[0..size]);
-
-            st.*.malloc_count -= 1;
-            st.*.malloc_size -= size;
-        }
-    }
-
-    pub fn malloc_usable_size(_: ?*const anyopaque) callconv(.C) usize {
-        return 0;
-    }
-};
-
 pub const Runtime = struct {
     rt: *QuickJS.JSRuntime,
-    alloc_context: *AllocContext,
     state: *State,
 
     var next_id: i32 = 0;
@@ -140,7 +64,7 @@ pub const Runtime = struct {
                 _ = QuickJS.JS_ToInt32(ctx, &timeout, argv[1]);
             }
 
-            const timer = Timer{ .id = next_id, .timeout = std.time.milliTimestamp() + timeout, .ctx = ctx, .func = QuickJS.JS_DupValue(ctx, func) };
+            const timer = Timer{ .id = next_id, .timeout = std.time.milliTimestamp() + timeout, .ctx = ctx, .func = QuickJS.DupValue(ctx, func) };
             next_id += 1;
 
             state.timers.add(timer) catch return QuickJS.JS_ThrowTypeError(ctx, "Unable to create timer");
@@ -150,33 +74,33 @@ pub const Runtime = struct {
     };
 
     pub const State = struct {
-        allocator: std.mem.Allocator,
+        alloc: AllocContext,
         timers: std.PriorityQueue(Timer, void, Timer.compare),
 
         pub fn deinit(self: *State) void {
             self.timers.deinit();
-            self.allocator.destroy(self);
+            self.alloc.allocator.destroy(self);
         }
     };
 
     pub fn init(allocator: std.mem.Allocator) !Runtime {
-        const ctx = try allocator.create(AllocContext);
-        errdefer allocator.destroy(ctx);
-
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
 
-        ctx.* = .{ .allocator = allocator, .allocations = std.AutoHashMap(usize, usize).init(allocator), .functions = .{
-            .js_malloc = AllocContext.malloc,
-            .js_free = AllocContext.free,
-            .js_realloc = AllocContext.realloc,
-            .js_malloc_usable_size = AllocContext.malloc_usable_size,
-        } };
+        state.* = .{
+            .alloc = .{
+                .allocator = allocator,
+                .functions = .{
+                    .js_malloc = AllocContext.malloc,
+                    .js_free = AllocContext.free,
+                    .js_realloc = AllocContext.realloc,
+                    .js_malloc_usable_size = AllocContext.malloc_usable_size,
+                },
+            },
+            .timers = std.PriorityQueue(Timer, void, Timer.compare).init(allocator, {}),
+        };
 
-        state.* = .{ .allocator = allocator, .timers = std.PriorityQueue(Timer, void, Timer.compare).init(allocator, {}) };
-
-        const runtime = QuickJS.JS_NewRuntime2(&ctx.functions, ctx);
-        //const runtime = QuickJS.JS_NewRuntime();
+        const runtime = QuickJS.JS_NewRuntime2(&state.alloc.functions, &state.alloc);
         errdefer QuickJS.JS_FreeRuntime(runtime);
 
         QuickJS.JS_SetRuntimeOpaque(runtime, state);
@@ -184,7 +108,6 @@ pub const Runtime = struct {
         if (runtime) |rt| {
             return Runtime{
                 .rt = rt,
-                .alloc_context = ctx,
                 .state = state,
             };
         }
@@ -194,7 +117,6 @@ pub const Runtime = struct {
 
     pub fn deinit(self: Runtime) void {
         QuickJS.JS_FreeRuntime(self.rt);
-        self.alloc_context.deinit();
         self.state.deinit();
     }
 
@@ -208,13 +130,13 @@ pub const Runtime = struct {
                 if (timer.timeout <= now) {
                     _ = self.state.timers.remove();
 
-                    const tempfunc = QuickJS.JS_DupValue(timer.ctx, timer.func);
-                    defer QuickJS.JS_FreeValue(timer.ctx, tempfunc);
+                    const tempfunc = QuickJS.DupValue(timer.ctx, timer.func);
+                    defer QuickJS.FreeValue(timer.ctx, tempfunc);
 
                     const ret = QuickJS.JS_Call(timer.ctx, tempfunc, QuickJS.UNDEFINED, 0, null);
 
-                    QuickJS.JS_FreeValue(timer.ctx, ret);
-                    QuickJS.JS_FreeValue(timer.ctx, timer.func);
+                    QuickJS.FreeValue(timer.ctx, ret);
+                    QuickJS.FreeValue(timer.ctx, timer.func);
                 } else {
                     break :w;
                 }
@@ -280,43 +202,39 @@ pub const Context = struct {
         QuickJS.JS_FreeContext(self.ctx);
     }
 
-    pub fn eval(self: *Context, comptime T: type, code: [:0]const u8) !mapping.Mapped(T) {
-        return self.evalInternal(T, code, "<eval>", QuickJS.JS_EVAL_TYPE_GLOBAL);
+    pub fn eval(self: Context, code: [:0]const u8) !mapping.Value {
+        return self.evalInternal(code, "<eval>", QuickJS.JS_EVAL_TYPE_GLOBAL);
     }
 
-    pub fn evalPrimitive(self: *Context, comptime T: type, code: [:0]const u8) !T {
-        const ret = QuickJS.JS_Eval(self.ctx, code, code.len, "<eval>", QuickJS.JS_EVAL_TYPE_GLOBAL);
-        errdefer QuickJS.JS_FreeValue(self.ctx, ret);
-
-        if (QuickJS.JS_IsException(ret) != 0) {
-            QuickJS.JS_FreeValue(self.ctx, ret);
-            return EvalError.Exception;
-        }
-
-        return mapping.fromValue(T, QuickJS.getAllocator(self.ctx), self.ctx, ret);
+    pub fn evalAs(self: Context, comptime T: type, code: [:0]const u8) !T {
+        return (try self.eval(code)).as(T);
     }
 
-    pub fn evalFile(self: *Context, comptime T: type, code: [:0]const u8, filename: [:0]const u8) !mapping.Mapped(T) {
-        return self.evalInternal(code, T, filename, QuickJS.JS_EVAL_TYPE_GLOBAL);
+    pub fn evalAsAlloc(self: Context, comptime T: type, code: [:0]const u8) !mapping.Mapped(T) {
+        return (try self.eval(code)).asAlloc(T);
     }
 
-    pub fn evalModule(self: *Context, comptime T: type, code: [:0]const u8, filename: [:0]const u8) !mapping.Mapped(T) {
-        return self.evalInternal(code, T, filename, QuickJS.JS_EVAL_TYPE_MODULE);
+    pub fn evalAsBuf(self: Context, comptime T: type, code: [:0]const u8, buf: []u8) !mapping.Mapped(T) {
+        return (try self.eval(code)).asBuf(T, buf);
     }
 
-    fn evalInternal(self: *Context, comptime T: type, code: [:0]const u8, filename: [:0]const u8, flags: c_int) !mapping.Mapped(T) {
+    pub fn evalModule(self: Context, code: [:0]const u8, filename: [:0]const u8) !mapping.Value {
+        return self.evalInternal(code, filename, QuickJS.JS_EVAL_TYPE_MODULE);
+    }
+
+    fn evalInternal(self: Context, code: [:0]const u8, filename: [:0]const u8, flags: c_int) !mapping.Value {
         const ret = QuickJS.JS_Eval(self.ctx, code, code.len, filename, flags);
-        errdefer QuickJS.JS_FreeValue(self.ctx, ret);
+        errdefer QuickJS.FreeValue(self.ctx, ret);
 
         if (QuickJS.JS_IsException(ret) != 0) {
-            QuickJS.JS_FreeValue(self.ctx, ret);
+            QuickJS.FreeValue(self.ctx, ret);
             return EvalError.Exception;
         }
 
-        return mapping.fromValueAlloc(T, QuickJS.getAllocator(self.ctx), self.ctx, ret);
+        return mapping.Value.init(self.ctx, ret);
     }
 
-    pub fn global(self: *Context) mapping.Object {
-        return mapping.Object{ .ctx = self.ctx, .value = QuickJS.JS_GetGlobalObject(self.ctx) };
+    pub fn global(self: Context) mapping.Object {
+        return mapping.Object.init(self.ctx, QuickJS.JS_GetGlobalObject(self.ctx));
     }
 };
