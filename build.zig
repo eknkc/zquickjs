@@ -50,15 +50,10 @@ pub fn build(b: *std.Build) void {
 fn setupModule(module: *std.Build.Module, upstream: *std.Build.Dependency, target: std.Build.ResolvedTarget) void {
     module.link_libc = true;
 
-    module.addIncludePath(upstream.path("sub_path: []const u8"));
+    module.addIncludePath(upstream.path(""));
 
     module.addCSourceFiles(.{
-        .root = .{
-            .dependency = .{
-                .dependency = upstream,
-                .sub_path = "",
-            },
-        },
+        .root = upstream.path(""),
         .files = &.{
             "cutils.c",
             "libregexp.c",
