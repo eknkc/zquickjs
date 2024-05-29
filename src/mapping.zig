@@ -17,7 +17,7 @@ pub const Value = struct {
     }
 
     /// Deinitialize the value and release allocated resources.
-    pub fn deinit(self: Function) void {
+    pub fn deinit(self: Value) void {
         QuickJS.FreeValue(self.ctx, self.value);
     }
 
@@ -330,24 +330,24 @@ fn toJSValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSVa
 
                     comptime var i = 0;
 
-                    var context: ?runtime.Context = null;
+                    //var context: ?runtime.Context = null;
 
                     inline for (types) |t| {
-                        if (t == runtime.Context) {
-                            if (context == null) {
-                                const rt = QuickJS.JS_GetRuntime(c);
-                                const state: *runtime.State = @ptrCast(@alignCast(QuickJS.JS_GetRuntimeOpaque(rt)));
+                        // if (t == runtime.Context) {
+                        //     if (context == null) {
+                        //         const rt = QuickJS.JS_GetRuntime(c);
+                        //         const state: *runtime.State = @ptrCast(@alignCast(QuickJS.JS_GetRuntimeOpaque(rt)));
 
-                                const zrt = runtime.Runtime{ .rt = rt, .state = state };
-                                context = runtime.Context{ .ctx = c, .runtime = &zrt };
-                            }
+                        //         const zrt = runtime.Runtime{ .rt = rt, .state = state };
+                        //         context = runtime.Context{ .ctx = c, .runtime = &zrt };
+                        //     }
 
-                            @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = context.? orelse unreachable;
-                        } else {
-                            const arg = fromJSValueAlloc(t, allocator, c, values[i]) catch unreachable;
-                            @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = arg.value;
-                            i += 1;
-                        }
+                        //     @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = context.? orelse unreachable;
+                        // } else {
+                        const arg = fromJSValueAlloc(t, true, allocator, c, values[i]) catch unreachable;
+                        @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = arg.value;
+                        i += 1;
+                        // }
                     }
 
                     const ret = @call(.auto, value, arg_tuple);

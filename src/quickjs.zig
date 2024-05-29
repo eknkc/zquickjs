@@ -7,11 +7,23 @@ pub const QuickJS = @cImport({
 
 pub usingnamespace QuickJS;
 
-pub inline fn GETTAG(v: QuickJS.JSValue) c_int {
+pub inline fn HAS_PTR(v: QuickJS.JSValue) bool {
+    return @as(c_uint, @bitCast(GET_TAG(v))) >= @as(c_uint, @bitCast(QuickJS.JS_TAG_FIRST));
+}
+
+pub inline fn GET_TAG(v: QuickJS.JSValue) c_int {
     if (@sizeOf(usize) >= 8) {
         return @intCast(v.tag);
     } else {
         return std.zig.c_translation.cast(i32, v >> 32);
+    }
+}
+
+pub inline fn GET_PTR(v: QuickJS.JSValue) ?*anyopaque {
+    if (@sizeOf(usize) >= 8) {
+        return v.u.ptr;
+    } else {
+        return @ptrFromInt(@as(u32, @truncate(v)));
     }
 }
 
@@ -24,8 +36,8 @@ pub inline fn MKVAL(tag: c_int, val: c_int) QuickJS.JSValue {
 }
 
 pub inline fn FreeValue(ctx: ?*QuickJS.JSContext, v: QuickJS.JSValue) void {
-    if (GETTAG(v) >= QuickJS.JS_TAG_FIRST) {
-        const p: [*c]QuickJS.JSRefCountHeader = @ptrCast(@alignCast(QuickJS.JS_VALUE_GET_PTR(v)));
+    if (HAS_PTR(v)) {
+        const p: [*c]QuickJS.JSRefCountHeader = @ptrCast(@alignCast(GET_PTR(v)));
 
         p.*.ref_count -= 1;
 
@@ -36,8 +48,8 @@ pub inline fn FreeValue(ctx: ?*QuickJS.JSContext, v: QuickJS.JSValue) void {
 }
 
 pub inline fn DupValue(_: ?*QuickJS.JSContext, v: QuickJS.JSValueConst) QuickJS.JSValue {
-    if (GETTAG(v) >= QuickJS.JS_TAG_FIRST) {
-        const p: [*c]QuickJS.JSRefCountHeader = @ptrCast(@alignCast(QuickJS.JS_VALUE_GET_PTR(v)));
+    if (HAS_PTR(v)) {
+        const p: [*c]QuickJS.JSRefCountHeader = @ptrCast(@alignCast(GET_PTR(v)));
         p.*.ref_count += 1;
     }
 
