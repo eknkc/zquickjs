@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const upstream = b.dependency("quickjs", .{});
+
     const zquickjs = b.addModule("zquickjs", .{
         .root_source_file = .{ .path = "src/root.zig" },
         .link_libc = true,
@@ -11,7 +13,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    setupModule(zquickjs, target);
+    setupModule(zquickjs, upstream, target);
 
     const lib = b.addStaticLibrary(.{
         .name = "zquickjs",
@@ -20,9 +22,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    setupModule(&lib.root_module, target);
-
-    zquickjs.linkLibrary(lib);
+    setupModule(&lib.root_module, upstream, target);
 
     const install_docs = b.addInstallDirectory(.{
         .source_dir = lib.getEmittedDocs(),
@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    setupModule(&tests.root_module, target);
+    setupModule(&tests.root_module, upstream, target);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
@@ -47,20 +47,27 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 }
 
-fn setupModule(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn setupModule(module: *std.Build.Module, upstream: *std.Build.Dependency, target: std.Build.ResolvedTarget) void {
     module.link_libc = true;
 
-    module.addIncludePath(.{
-        .path = "c/quickjs",
-    });
+    module.addIncludePath(upstream.path("sub_path: []const u8"));
 
-    module.addCSourceFiles(.{ .files = &.{
-        "c/quickjs/cutils.c",
-        "c/quickjs/libregexp.c",
-        "c/quickjs/libunicode.c",
-        "c/quickjs/libbf.c",
-        "c/quickjs/quickjs.c",
-    }, .flags = &.{} });
+    module.addCSourceFiles(.{
+        .root = .{
+            .dependency = .{
+                .dependency = upstream,
+                .sub_path = "",
+            },
+        },
+        .files = &.{
+            "cutils.c",
+            "libregexp.c",
+            "libunicode.c",
+            "libbf.c",
+            "quickjs.c",
+        },
+        .flags = &.{},
+    });
 
     module.addCMacro("CONFIG_VERSION", "\"2021-03-27\"");
     module.addCMacro("CONFIG_BIGNUM", "1");

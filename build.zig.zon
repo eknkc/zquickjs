@@ -2,7 +2,12 @@
     .name = "zquickjs",
     .version = "0.0.0",
     .minimum_zig_version = "0.12.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .quickjs = .{
+            .url = "https://github.com/bellard/quickjs/archive/d378a9f3a583cb787c390456e27276d0ee377d23.tar.gz",
+            .hash = "1220f019d1b3a95f2c0d1954d39ee732dda1c8f76560cf9cdeb4e47d2723363debdf",
+        },
+    },
     .paths = .{
         "",
     },
