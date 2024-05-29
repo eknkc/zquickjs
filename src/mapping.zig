@@ -12,6 +12,12 @@ pub const Value = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
 
+    /// Create a new JS value from the provided value
+    pub fn from(ctx: ?*QuickJS.JSContext, value: anytype) !Value {
+        const jsvalue = try toJSValue(ctx, value);
+        return Value{ .ctx = ctx, .value = jsvalue };
+    }
+
     pub fn init(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) Value {
         return Value{ .ctx = ctx, .value = value };
     }
@@ -53,8 +59,8 @@ pub const Value = struct {
     /// Returns the value as a specific type.
     /// If the value is not compatible with the type, an error is returned.
     /// The returned type uses the provided buffer to allocate memory.
-    pub fn asBuf(self: Value, comptime T: type, buf: []u8) !Mapped(T) {
-        const alloc = std.heap.FixedBufferAllocator.init(buf);
+    pub fn asBuf(self: Value, comptime T: type, buf: []u8) !T {
+        var alloc = std.heap.FixedBufferAllocator.init(buf);
         const mapped = try fromJSValueAlloc(T, true, alloc.allocator(), self.ctx, self.value);
         return mapped.value;
     }

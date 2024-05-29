@@ -10,6 +10,8 @@ pub const Object = mapping.Object;
 pub const Function = mapping.Function;
 pub const Promise = mapping.Promise;
 
+pub const Mapped = mapping.Mapped;
+
 const std = @import("std");
 
 test "create runtime" {

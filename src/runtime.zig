@@ -244,7 +244,7 @@ pub const Context = struct {
 
     /// Same as `eval` but uses the provided buffer as scratch space. If the buffer is not large enough, an error is returned.
     /// Can map to strings, arrays, structs, etc.
-    pub fn evalAsBuf(self: Context, comptime T: type, code: [:0]const u8, buf: []u8) !mapping.Mapped(T) {
+    pub fn evalAsBuf(self: Context, comptime T: type, code: [:0]const u8, buf: []u8) !T {
         return (try self.eval(code)).asBuf(T, buf);
     }
 
@@ -253,12 +253,16 @@ pub const Context = struct {
         return self.evalInternal(code, filename, QuickJS.JS_EVAL_TYPE_MODULE);
     }
 
+    /// Creates a new JS `Value` from the provided value.
+    pub fn createValue(self: Context, value: anytype) !mapping.Value {
+        return mapping.Value.init(self.ctx, value);
+    }
+
     fn evalInternal(self: Context, code: [:0]const u8, filename: [:0]const u8, flags: c_int) !mapping.Value {
         const ret = QuickJS.JS_Eval(self.ctx, code, code.len, filename, flags);
         errdefer QuickJS.FreeValue(self.ctx, ret);
 
         if (QuickJS.JS_IsException(ret) != 0) {
-            QuickJS.FreeValue(self.ctx, ret);
             return EvalError.Exception;
         }
 
@@ -268,5 +272,14 @@ pub const Context = struct {
     /// Returns the global object of the context.
     pub fn global(self: Context) mapping.Object {
         return mapping.Object.init(self.ctx, QuickJS.JS_GetGlobalObject(self.ctx));
+    }
+
+    /// Returns the latest exception thrown in the context.
+    pub fn exception(self: Context) ?mapping.Value {
+        if (QuickJS.JS_HasException(self.ctx) != 0) {
+            return mapping.Value.init(self.ctx, QuickJS.JS_GetException(self.ctx));
+        }
+
+        return null;
     }
 };
