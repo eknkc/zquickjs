@@ -33,6 +33,7 @@ fn initmodule(ctx: ?*QuickJS.JSContext, module: ?*QuickJS.JSModuleDef) callconv(
     return 0;
 }
 
+/// QuickJS runtime, entry point of the library.
 pub const Runtime = struct {
     rt: *QuickJS.JSRuntime,
     state: *State,
@@ -83,6 +84,8 @@ pub const Runtime = struct {
         }
     };
 
+    /// Initializes the QuickJS runtime.
+    /// The provided allocator is used to allocate memory for the runtime.
     pub fn init(allocator: std.mem.Allocator) !Runtime {
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
@@ -115,6 +118,7 @@ pub const Runtime = struct {
         return RuntimeError.UnableToInitialize;
     }
 
+    /// Deinitializes the QuickJS runtime.
     pub fn deinit(self: Runtime) void {
         QuickJS.JS_FreeRuntime(self.rt);
         self.state.deinit();
@@ -122,6 +126,10 @@ pub const Runtime = struct {
 
     const TickResult = union(enum) { done, idleMs: u32, exception: mapping.Value };
 
+    /// Executes the next tick of the runtime. All pending jobs (promise continuations, timers etc.) are executed.
+    /// If there are no more pending jobs, the function returns `done`.
+    /// If there are pending timers, the function returns `idleMs` with the number of milliseconds until the next timer.
+    /// If an exception is thrown during the execution of a job, the function returns `exception` with the exception value.
     pub fn tick(self: *Runtime) TickResult {
         const now = std.time.milliTimestamp();
 
@@ -165,6 +173,7 @@ pub const Runtime = struct {
         return .done;
     }
 
+    /// Creates a new context for the runtime.
     pub fn newContext(self: *Runtime) !Context {
         return Context.init(self);
     }
@@ -172,10 +181,13 @@ pub const Runtime = struct {
 
 const EvalError = error{Exception};
 
+/// A single execution context with its own global variables and stack
+/// Can share objects with other contexts of the same runtime.
 pub const Context = struct {
     runtime: *Runtime,
     ctx: *QuickJS.JSContext,
 
+    /// Initializes a new context for the provided runtime.
     pub fn init(runtime: *Runtime) !Context {
         const ctx = QuickJS.JS_NewContext(runtime.rt);
         errdefer QuickJS.JS_FreeContext(ctx);
@@ -198,30 +210,45 @@ pub const Context = struct {
         return RuntimeError.UnableToInitialize;
     }
 
+    /// Deinitializes the context.
     pub fn deinit(self: Context) void {
         QuickJS.JS_FreeContext(self.ctx);
     }
 
+    /// Evaluates the provided code in the context and returns a `Value` with the result.
     pub fn eval(self: Context, code: [:0]const u8) !mapping.Value {
         return self.evalInternal(code, "<eval>", QuickJS.JS_EVAL_TYPE_GLOBAL);
     }
 
+    /// Evaluates the provided code in the context and returns the resulting value mapped to T
+    /// If the result can not be mapped to T, an error is returned.
+    /// If an exception is thrown during the evaluation, an error is returned.
+    /// If the resulting type needs to be allocated, returns an error. Please use `evalAsAlloc` instead.
     pub fn evalAs(self: Context, comptime T: type, code: [:0]const u8) !T {
         return (try self.eval(code)).as(T);
     }
 
+    /// Same as `eval` but uses the runtime allocator to allocate memory.
+    /// Can map to strings, arrays, structs, etc.
+    /// Resulting struct needs to be deallocated manually using `deinit` method.
     pub fn evalAsAlloc(self: Context, comptime T: type, code: [:0]const u8) !mapping.Mapped(T) {
         return (try self.eval(code)).asAlloc(T);
     }
 
+    /// Same as `eval` but uses the provided allocator to allocate memory.
+    /// Can map to strings, arrays, structs, etc.
+    /// Resulting struct needs to be deallocated manually using `deinit` method.
     pub fn evalAsAllocIn(self: Context, comptime T: type, allocator: std.mem.Allocator, code: [:0]const u8) !mapping.Mapped(T) {
         return (try self.eval(code)).asAllocIn(T, allocator);
     }
 
+    /// Same as `eval` but uses the provided buffer as scratch space. If the buffer is not large enough, an error is returned.
+    /// Can map to strings, arrays, structs, etc.
     pub fn evalAsBuf(self: Context, comptime T: type, code: [:0]const u8, buf: []u8) !mapping.Mapped(T) {
         return (try self.eval(code)).asBuf(T, buf);
     }
 
+    /// Evaluates the provided code in the context as a module and returns a `Value` with the result.
     pub fn evalModule(self: Context, code: [:0]const u8, filename: [:0]const u8) !mapping.Value {
         return self.evalInternal(code, filename, QuickJS.JS_EVAL_TYPE_MODULE);
     }
@@ -238,6 +265,7 @@ pub const Context = struct {
         return mapping.Value.init(self.ctx, ret);
     }
 
+    /// Returns the global object of the context.
     pub fn global(self: Context) mapping.Object {
         return mapping.Object.init(self.ctx, QuickJS.JS_GetGlobalObject(self.ctx));
     }
