@@ -1,8 +1,13 @@
 const std = @import("std");
 const QuickJS = @import("quickjs.zig");
+const runtime = @import("runtime.zig");
 
 pub const ValueType = enum { Bool, Number, String, Symbol, Object, Promise, Array, Function, Exception, Null, Undefined, Uninitialized };
 
+/// A value that represents a JavaScript value.
+/// Can be any valid JavaScript value.
+/// The value is reference counted and will be automatically freed when the last reference is dropped.
+/// It is required to call `deinit` to free the allocated resources.
 pub const Value = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
@@ -32,8 +37,17 @@ pub const Value = struct {
     /// Returns the value as a specific type.
     /// If the value is not compatible with the type, an error is returned.
     /// The returned type has a `deinit` method that must be called to free the allocated memory.
+    /// Allocation is done using the runtime allocator.
     pub fn asAlloc(self: Value, comptime T: type) !Mapped(T) {
         return fromJSValueAlloc(T, true, null, self.ctx, self.value);
+    }
+
+    /// Returns the value as a specific type.
+    /// If the value is not compatible with the type, an error is returned.
+    /// The returned type has a `deinit` method that must be called to free the allocated memory.
+    /// Allocation is done using the provided allocator.
+    pub fn asAllocIn(self: Value, comptime T: type, allocator: std.mem.Allocator) !Mapped(T) {
+        return fromJSValueAlloc(T, true, allocator, self.ctx, self.value);
     }
 
     /// Returns the value as a specific type.
@@ -46,6 +60,9 @@ pub const Value = struct {
     }
 };
 
+/// A JavaScript function reference.
+/// The function can be called with the provided arguments.
+/// It is required to call `deinit` to free the allocated resources.
 pub const Function = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
@@ -88,6 +105,9 @@ pub const Function = struct {
     }
 };
 
+/// A JavaScript object reference.
+/// The object can be manipulated using the provided methods.
+/// It is required to call `deinit` to free the allocated resources.
 pub const Object = struct {
     ctx: ?*QuickJS.JSContext,
     value: QuickJS.JSValue,
@@ -124,6 +144,9 @@ pub const Object = struct {
         }
     };
 
+    /// Get an iterator over the object keys.
+    /// The iterator will return the keys as strings.
+    /// Call `deinit` to free the allocated resources.
     pub fn keys(self: Object) !KeysIterator {
         var count: u32 = 0;
         var ptab: [*c]QuickJS.JSPropertyEnum = undefined;
@@ -137,6 +160,7 @@ pub const Object = struct {
         return KeysIterator{ .obj = self, .count = count, .ptab = ptab };
     }
 
+    /// Check if the object has a property with the provided key.
     pub fn hasProperty(self: Object, key: []const u8) !bool {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
@@ -148,6 +172,7 @@ pub const Object = struct {
         return QuickJS.JS_HasProperty(self.ctx, self.value, atom) != 0;
     }
 
+    /// Get a property from the object.
     pub fn getProperty(self: Object, key: []const u8) !Value {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
@@ -156,6 +181,7 @@ pub const Object = struct {
         return Value.init(self.ctx, QuickJS.JS_GetPropertyStr(self.ctx, self.value, ckey.ptr));
     }
 
+    /// Set a property on the object.
     pub fn setProperty(self: Object, key: []const u8, value: anytype) !void {
         const val = try toJSValue(self.ctx, value);
         errdefer QuickJS.FreeValue(self.ctx, val);
@@ -171,6 +197,7 @@ pub const Object = struct {
         }
     }
 
+    /// Delete a property from the object.
     pub fn deleteProperty(self: Object, key: []const u8) !void {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
@@ -198,6 +225,8 @@ pub const Promise = struct {
 
 pub const MappingError = error{ FloatIncompatible, IntIncompatible, NeedsAllocator, CanNotConvert };
 
+/// A mapped value that can be used to interact with JavaScript values.
+/// It is required to call `deinit` to free the allocated resources.
 pub fn Mapped(comptime T: type) type {
     return struct {
         value: T,
@@ -214,7 +243,17 @@ pub fn Mapped(comptime T: type) type {
 }
 
 fn toJSValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSValue {
-    return switch (@typeInfo(@TypeOf(value))) {
+    const typeOf = @TypeOf(value);
+
+    switch (typeOf) {
+        Value => return value.value,
+        Function => return value.value,
+        Object => return value.value,
+        Promise => return value.value,
+        else => {},
+    }
+
+    return switch (@typeInfo(typeOf)) {
         .Bool => QuickJS.JS_NewBool(ctx, @intFromBool(value)),
         .Float, .ComptimeFloat => QuickJS.JS_NewFloat64(ctx, @floatCast(value)),
         .Int, .ComptimeInt => QuickJS.JS_NewInt64(ctx, std.math.cast(i64, value) orelse return MappingError.IntIncompatible),
@@ -289,9 +328,26 @@ fn toJSValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSVa
                     defer arena.deinit();
                     const allocator = arena.allocator();
 
-                    inline for (types, 0..) |t, i| {
-                        const arg = fromJSValueAlloc(t, allocator, c, values[i]) catch unreachable;
-                        @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = arg.value;
+                    comptime var i = 0;
+
+                    var context: ?runtime.Context = null;
+
+                    inline for (types) |t| {
+                        if (t == runtime.Context) {
+                            if (context == null) {
+                                const rt = QuickJS.JS_GetRuntime(c);
+                                const state: *runtime.State = @ptrCast(@alignCast(QuickJS.JS_GetRuntimeOpaque(rt)));
+
+                                const zrt = runtime.Runtime{ .rt = rt, .state = state };
+                                context = runtime.Context{ .ctx = c, .runtime = &zrt };
+                            }
+
+                            @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = context.? orelse unreachable;
+                        } else {
+                            const arg = fromJSValueAlloc(t, allocator, c, values[i]) catch unreachable;
+                            @field(arg_tuple, try std.fmt.bufPrintZ(&buf, "{d}", .{i})) = arg.value;
+                            i += 1;
+                        }
                     }
 
                     const ret = @call(.auto, value, arg_tuple);

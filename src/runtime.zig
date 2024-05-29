@@ -214,6 +214,10 @@ pub const Context = struct {
         return (try self.eval(code)).asAlloc(T);
     }
 
+    pub fn evalAsAllocIn(self: Context, comptime T: type, allocator: std.mem.Allocator, code: [:0]const u8) !mapping.Mapped(T) {
+        return (try self.eval(code)).asAllocIn(T, allocator);
+    }
+
     pub fn evalAsBuf(self: Context, comptime T: type, code: [:0]const u8, buf: []u8) !mapping.Mapped(T) {
         return (try self.eval(code)).asBuf(T, buf);
     }
