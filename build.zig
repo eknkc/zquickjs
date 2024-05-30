@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const upstream = b.dependency("quickjs", .{});
 
     const zquickjs = b.addModule("zquickjs", .{
-        .root_source_file = .{ .path = "src/root.zig" },
+        .root_source_file = b.path("src/root.zig"),
         .link_libc = true,
         .target = target,
         .optimize = optimize,
