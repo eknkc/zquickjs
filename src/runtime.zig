@@ -177,15 +177,82 @@ pub const Runtime = struct {
     pub fn newContext(self: *Runtime) !Context {
         return Context.init(self);
     }
+
+    /// Runs the garbage collector.
+    pub fn runGC(self: Runtime) void {
+        QuickJS.JS_RunGC(self.rt);
+    }
+
+    pub fn setModuleLoader(self: Runtime, loader: fn (name: []const u8) ?[]const u8) void {
+        const Loader = struct {
+            pub fn load(ctx: ?*QuickJS.JSContext, name: [*c]const u8, _: ?*anyopaque) callconv(.C) ?*QuickJS.JSModuleDef {
+                const namestr = std.mem.span(name);
+                const code = loader(namestr);
+
+                if (code) |c| {
+                    const allocator = QuickJS.getAllocator(ctx);
+
+                    const codeC = allocator.dupeZ(u8, c) catch {
+                        _ = QuickJS.JS_ThrowReferenceError(ctx, "out of memory while loading module %s", name);
+                        return null;
+                    };
+
+                    defer allocator.free(codeC);
+
+                    const ret = QuickJS.JS_Eval(ctx, codeC, codeC.len, name, QuickJS.JS_EVAL_TYPE_MODULE | QuickJS.JS_EVAL_FLAG_COMPILE_ONLY);
+
+                    if (QuickJS.JS_IsException(ret) != 0) {
+                        return null;
+                    }
+
+                    const def: *QuickJS.JSModuleDef = @ptrCast(@alignCast(QuickJS.GET_PTR(ret)));
+                    QuickJS.FreeValue(ctx, ret);
+
+                    return def;
+                } else {
+                    _ = QuickJS.JS_ThrowReferenceError(ctx, "could not load module %s", name);
+                    return null;
+                }
+            }
+        };
+
+        QuickJS.JS_SetModuleLoaderFunc(self.rt, null, Loader.load, null);
+    }
 };
 
 const EvalError = error{Exception};
+
+fn prnt(v: []u8) i32 {
+    std.debug.print("{s}\n", .{v});
+    return 0;
+}
 
 /// A single execution context with its own global variables and stack
 /// Can share objects with other contexts of the same runtime.
 pub const Context = struct {
     runtime: *Runtime,
     ctx: *QuickJS.JSContext,
+    state: *State,
+
+    pub const State = struct {
+        pub const Arena = struct {
+            ctx: *QuickJS.JSContext,
+            arena: *std.heap.ArenaAllocator,
+            values: std.ArrayList(QuickJS.JSValue),
+
+            pub fn deinit(self: *Arena) void {
+                for (self.values.items) |value| {
+                    QuickJS.FreeValue(self.ctx, value);
+                }
+
+                const alloc = self.arena.child_allocator;
+                self.arena.deinit();
+                alloc.destroy(self.arena);
+            }
+        };
+
+        arenas: std.SinglyLinkedList(Arena),
+    };
 
     /// Initializes a new context for the provided runtime.
     pub fn init(runtime: *Runtime) !Context {
@@ -196,23 +263,85 @@ pub const Context = struct {
             const am = QuickJS.JS_NewCModule(c, "deneme", initmodule);
             _ = QuickJS.JS_AddModuleExport(ctx, am, "hello");
 
-            var context = Context{ .runtime = runtime, .ctx = c };
+            const ct = Context{
+                .runtime = runtime,
+                .ctx = c,
+                .state = try runtime.state.alloc.allocator.create(State),
+            };
 
-            const g = context.global();
-            defer g.deinit();
+            errdefer runtime.state.alloc.allocator.destroy(ct.state);
 
-            _ = QuickJS.JS_SetProperty(c, g.value, QuickJS.JS_NewAtom(c, "setTimeout"), QuickJS.JS_NewCFunction(c, Runtime.Timer.setTimeout, "setTimeout", 2));
-            _ = QuickJS.JS_SetProperty(c, g.value, QuickJS.JS_NewAtom(c, "printf"), QuickJS.JS_NewCFunction(c, js_print, "printf", 2));
+            ct.state.* = .{
+                .arenas = std.SinglyLinkedList(State.Arena){},
+            };
 
-            return context;
+            QuickJS.JS_SetContextOpaque(c, ct.state);
+
+            const glb = ct.global();
+            defer glb.deinit();
+
+            try glb.setProperty("printf", prnt);
+
+            return ct;
         }
 
         return RuntimeError.UnableToInitialize;
     }
 
+    pub const ArenaRef = struct {
+        arenas: *std.SinglyLinkedList(State.Arena),
+        node: *std.SinglyLinkedList(State.Arena).Node,
+
+        pub fn deinit(self: *ArenaRef) void {
+            const alloc = self.node.data.arena.child_allocator;
+
+            self.node.data.deinit();
+            self.arenas.remove(self.node);
+
+            alloc.destroy(self.node);
+        }
+    };
+
+    /// Begins a new arena in the context.
+    /// Any allocations or values created in the arena will be deallocated when the arena is deinitialized.
+    /// You do not need to explicitly free the values created in the arena.
+    pub fn beginArena(self: Context) !ArenaRef {
+        return self.beginArenaIn(QuickJS.getAllocator(self.ctx));
+    }
+
+    /// Begins a new arena in a specific allocator.
+    /// Any allocations or values created in the arena will be deallocated when the arena is deinitialized.
+    /// You do not need to explicitly free the values created in the arena.
+    pub fn beginArenaIn(self: Context, allocator: std.mem.Allocator) !ArenaRef {
+        var arena = try allocator.create(std.heap.ArenaAllocator);
+        errdefer allocator.destroy(arena);
+
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const alloc = arena.allocator();
+
+        const node = try allocator.create(std.SinglyLinkedList(State.Arena).Node);
+        errdefer allocator.destroy(node);
+
+        node.*.data = State.Arena{
+            .ctx = self.ctx,
+            .arena = arena,
+            .values = try std.ArrayList(QuickJS.JSValue).initCapacity(alloc, 16),
+        };
+
+        self.state.arenas.prepend(node);
+
+        return ArenaRef{
+            .arenas = &self.state.arenas,
+            .node = node,
+        };
+    }
+
     /// Deinitializes the context.
     pub fn deinit(self: Context) void {
         QuickJS.JS_FreeContext(self.ctx);
+        self.runtime.state.alloc.allocator.destroy(self.state);
     }
 
     /// Evaluates the provided code in the context and returns a `Value` with the result.
@@ -270,8 +399,8 @@ pub const Context = struct {
     }
 
     /// Returns the global object of the context.
-    pub fn global(self: Context) mapping.Object {
-        return mapping.Object.init(self.ctx, QuickJS.JS_GetGlobalObject(self.ctx));
+    pub fn global(self: Context) mapping.Value {
+        return mapping.Value.init(self.ctx, QuickJS.JS_GetGlobalObject(self.ctx));
     }
 
     /// Returns the latest exception thrown in the context.

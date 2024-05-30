@@ -6,9 +6,6 @@ pub const Context = runtime.Context;
 
 pub const Value = mapping.Value;
 pub const ValueType = mapping.ValueType;
-pub const Object = mapping.Object;
-pub const Function = mapping.Function;
-pub const Promise = mapping.Promise;
 
 pub const Mapped = mapping.Mapped;
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const RuntimeState = @import("runtime.zig").Runtime.State;
+const Context = @import("runtime.zig").Context;
 
 pub const QuickJS = @cImport({
     @cInclude("quickjs.h");
@@ -59,7 +60,22 @@ pub inline fn DupValue(_: ?*QuickJS.JSContext, v: QuickJS.JSValueConst) QuickJS.
 pub const NULL = MKVAL(QuickJS.JS_TAG_NULL, 0);
 pub const UNDEFINED = MKVAL(QuickJS.JS_TAG_UNDEFINED, 0);
 
+pub fn getArena(ctx: ?*QuickJS.JSContext) ?*Context.State.Arena {
+    const ctopaque = QuickJS.JS_GetContextOpaque(ctx);
+    const ctstate: *Context.State = @ptrCast(@alignCast(ctopaque));
+
+    if (ctstate.arenas.first) |node| {
+        return &node.*.data;
+    }
+
+    return null;
+}
+
 pub fn getAllocator(ctx: ?*QuickJS.JSContext) std.mem.Allocator {
+    if (getArena(ctx)) |arena| {
+        return arena.arena.allocator();
+    }
+
     const rtopaque = QuickJS.JS_GetRuntimeOpaque(QuickJS.JS_GetRuntime(ctx));
     const state: *RuntimeState = @ptrCast(@alignCast(rtopaque));
 

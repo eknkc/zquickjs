@@ -15,15 +15,23 @@ pub const Value = struct {
     /// Create a new JS value from the provided value
     pub fn from(ctx: ?*QuickJS.JSContext, value: anytype) !Value {
         const jsvalue = try toJSValue(ctx, value);
-        return Value{ .ctx = ctx, .value = jsvalue };
+        return Value.init(ctx, jsvalue);
     }
 
     pub fn init(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) Value {
+        if (QuickJS.getArena(ctx)) |arena| {
+            arena.values.append(value) catch unreachable;
+        }
+
         return Value{ .ctx = ctx, .value = value };
     }
 
     /// Deinitialize the value and release allocated resources.
     pub fn deinit(self: Value) void {
+        if (QuickJS.getArena(self.ctx) != null) {
+            return;
+        }
+
         QuickJS.FreeValue(self.ctx, self.value);
     }
 
@@ -64,24 +72,15 @@ pub const Value = struct {
         const mapped = try fromJSValueAlloc(T, true, alloc.allocator(), self.ctx, self.value);
         return mapped.value;
     }
-};
-
-/// A JavaScript function reference.
-/// The function can be called with the provided arguments.
-/// It is required to call `deinit` to free the allocated resources.
-pub const Function = struct {
-    ctx: ?*QuickJS.JSContext,
-    value: QuickJS.JSValue,
-
-    /// Deinitialize the value and release allocated resources.
-    pub fn deinit(self: Function) void {
-        QuickJS.FreeValue(self.ctx, self.value);
-    }
 
     /// Call the function with the provided arguments.
     /// The return type must be provided as a comptime parameter.
     /// Return type can be `Value` or any other type that can be mapped from a JS value.
-    pub fn call(self: Function, comptime ReturnType: type, args: anytype) !Mapped(ReturnType) {
+    pub fn call(self: Value, comptime ReturnType: type, args: anytype) !Mapped(ReturnType) {
+        if (QuickJS.JS_IsFunction(self.ctx, self.value) == 0) {
+            return error.NotAFunction;
+        }
+
         const ti = @typeInfo(@TypeOf(args));
 
         if (ti != .Struct or !ti.Struct.is_tuple) {
@@ -109,28 +108,12 @@ pub const Function = struct {
 
         return fromJSValueAlloc(ReturnType, true, null, self.ctx, ret);
     }
-};
-
-/// A JavaScript object reference.
-/// The object can be manipulated using the provided methods.
-/// It is required to call `deinit` to free the allocated resources.
-pub const Object = struct {
-    ctx: ?*QuickJS.JSContext,
-    value: QuickJS.JSValue,
-
-    pub fn init(ctx: ?*QuickJS.JSContext, value: QuickJS.JSValue) Object {
-        return Object{ .ctx = ctx, .value = value };
-    }
-
-    pub fn deinit(self: Object) void {
-        QuickJS.FreeValue(self.ctx, self.value);
-    }
 
     const KeysIterator = struct {
-        obj: Object,
+        ctx: ?*QuickJS.JSContext,
+        ptab: [*c]QuickJS.JSPropertyEnum,
         index: u32 = 0,
         count: u32,
-        ptab: [*c]QuickJS.JSPropertyEnum,
 
         pub fn deinit(self: KeysIterator) void {
             QuickJS.js_free(self.obj.ctx, self.ptab);
@@ -153,7 +136,7 @@ pub const Object = struct {
     /// Get an iterator over the object keys.
     /// The iterator will return the keys as strings.
     /// Call `deinit` to free the allocated resources.
-    pub fn keys(self: Object) !KeysIterator {
+    pub fn keys(self: Value) !KeysIterator {
         var count: u32 = 0;
         var ptab: [*c]QuickJS.JSPropertyEnum = undefined;
 
@@ -163,11 +146,11 @@ pub const Object = struct {
             return error.UnableToGetProperties;
         }
 
-        return KeysIterator{ .obj = self, .count = count, .ptab = ptab };
+        return KeysIterator{ .ctx = self.ctx, .count = count, .ptab = ptab };
     }
 
     /// Check if the object has a property with the provided key.
-    pub fn hasProperty(self: Object, key: []const u8) !bool {
+    pub fn hasProperty(self: Value, key: []const u8) !bool {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
         defer allocator.free(ckey);
@@ -179,16 +162,23 @@ pub const Object = struct {
     }
 
     /// Get a property from the object.
-    pub fn getProperty(self: Object, key: []const u8) !Value {
+    pub fn getProperty(self: Value, key: []const u8) !Value {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
         defer allocator.free(ckey);
 
-        return Value.init(self.ctx, QuickJS.JS_GetPropertyStr(self.ctx, self.value, ckey.ptr));
+        const ret = QuickJS.JS_GetPropertyStr(self.ctx, self.value, ckey.ptr);
+        errdefer QuickJS.FreeValue(self.ctx, ret);
+
+        if (QuickJS.JS_IsException(ret) != 0) {
+            return error.Exception;
+        }
+
+        return Value.init(self.ctx, ret);
     }
 
     /// Set a property on the object.
-    pub fn setProperty(self: Object, key: []const u8, value: anytype) !void {
+    pub fn setProperty(self: Value, key: []const u8, value: anytype) !void {
         const val = try toJSValue(self.ctx, value);
         errdefer QuickJS.FreeValue(self.ctx, val);
 
@@ -204,7 +194,7 @@ pub const Object = struct {
     }
 
     /// Delete a property from the object.
-    pub fn deleteProperty(self: Object, key: []const u8) !void {
+    pub fn deleteProperty(self: Value, key: []const u8) !void {
         const allocator = QuickJS.getAllocator(self.ctx);
         const ckey = try allocator.dupeZ(u8, key);
         defer allocator.free(ckey);
@@ -217,15 +207,6 @@ pub const Object = struct {
         if (res == 0) {
             return error.CanNotDeleteProperty;
         }
-    }
-};
-
-pub const Promise = struct {
-    ctx: ?*QuickJS.JSContext,
-    value: QuickJS.JSValue,
-
-    pub fn deinit(self: Promise) void {
-        QuickJS.FreeValue(self.ctx, self.value);
     }
 };
 
@@ -251,12 +232,8 @@ pub fn Mapped(comptime T: type) type {
 fn toJSValue(ctx: ?*QuickJS.JSContext, value: anytype) MappingError!QuickJS.JSValue {
     const typeOf = @TypeOf(value);
 
-    switch (typeOf) {
-        Value => return value.value,
-        Function => return value.value,
-        Object => return value.value,
-        Promise => return value.value,
-        else => {},
+    if (typeOf == Value) {
+        return value.value;
     }
 
     return switch (@typeInfo(typeOf)) {
@@ -379,22 +356,7 @@ fn fromJSValueAlloc(comptime T: type, comptime allocate: bool, allocator: ?std.m
 
     switch (T) {
         Value => {
-            return Mapped(T){ .value = Value{
-                .ctx = ctx,
-                .value = QuickJS.DupValue(ctx, value),
-            } };
-        },
-        Function => {
-            return if (QuickJS.JS_IsFunction(ctx, value) != 0) Mapped(T){ .value = Function{
-                .ctx = ctx,
-                .value = QuickJS.DupValue(ctx, value),
-            } } else MappingError.CanNotConvert;
-        },
-        Object => {
-            return if (QuickJS.JS_IsObject(value) != 0) Mapped(T){ .value = Object{
-                .ctx = ctx,
-                .value = QuickJS.DupValue(ctx, value),
-            } } else MappingError.CanNotConvert;
+            return Mapped(T){ .value = Value.init(ctx, QuickJS.DupValue(ctx, value)) };
         },
         else => switch (@typeInfo(T)) {
             .Bool => QuickJS.JS_ToBool(ctx, value) != 0,
