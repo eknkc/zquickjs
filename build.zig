@@ -15,14 +15,10 @@ pub fn build(b: *std.Build) void {
 
     setupModule(zquickjs, upstream, target);
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "zquickjs",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = zquickjs,
     });
-
-    setupModule(&lib.root_module, upstream, target);
 
     const install_docs = b.addInstallDirectory(.{
         .source_dir = lib.getEmittedDocs(),
@@ -34,12 +30,8 @@ pub fn build(b: *std.Build) void {
     docs_step.dependOn(&install_docs.step);
 
     const tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = zquickjs,
     });
-
-    setupModule(&tests.root_module, upstream, target);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
