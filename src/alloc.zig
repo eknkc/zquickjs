@@ -5,11 +5,11 @@ const native_endian = @import("builtin").target.cpu.arch.endian();
 const AllocContext = @This();
 
 allocator: std.mem.Allocator,
-functions: QuickJS.JSMallocFunctions,
+functions: QuickJS.C.JSMallocFunctions,
 
 const HEADER_SIZE: usize = 16;
 
-pub fn malloc(st: [*c]QuickJS.JSMallocState, size: usize) callconv(.C) ?*anyopaque {
+pub fn malloc(st: [*c]QuickJS.C.JSMallocState, size: usize) callconv(.c) ?*anyopaque {
     if (size == 0 or st.*.malloc_size + size > st.*.malloc_limit) {
         return null;
     }
@@ -25,7 +25,7 @@ pub fn malloc(st: [*c]QuickJS.JSMallocState, size: usize) callconv(.C) ?*anyopaq
     return allocated[HEADER_SIZE..].ptr;
 }
 
-pub fn realloc(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque, size: usize) callconv(.C) ?*anyopaque {
+pub fn realloc(st: [*c]QuickJS.C.JSMallocState, ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
     var context: *AllocContext = @ptrCast(@alignCast(st.*.@"opaque"));
 
     if (ptr == null) {
@@ -53,7 +53,7 @@ pub fn realloc(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque, size: usize) cal
     return newp[HEADER_SIZE..].ptr;
 }
 
-pub fn free(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque) callconv(.C) void {
+pub fn free(st: [*c]QuickJS.C.JSMallocState, ptr: ?*anyopaque) callconv(.c) void {
     var context: *AllocContext = @ptrCast(@alignCast(st.*.@"opaque"));
 
     if (ptr) |p| {
@@ -67,6 +67,6 @@ pub fn free(st: [*c]QuickJS.JSMallocState, ptr: ?*anyopaque) callconv(.C) void {
     }
 }
 
-pub fn malloc_usable_size(_: ?*const anyopaque) callconv(.C) usize {
+pub fn malloc_usable_size(_: ?*const anyopaque) callconv(.c) usize {
     return 0;
 }

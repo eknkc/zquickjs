@@ -12,12 +12,12 @@ pub const Mapped = mapping.Mapped;
 const std = @import("std");
 
 test "create runtime" {
-    const rt = try Runtime.init(std.testing.allocator);
+    const rt = try Runtime.init(std.testing.allocator, std.testing.io);
     defer rt.deinit();
 }
 
 test "create context" {
-    var rt = try Runtime.init(std.testing.allocator);
+    var rt = try Runtime.init(std.testing.allocator, std.testing.io);
     defer rt.deinit();
 
     const ctx = try rt.newContext();
@@ -25,7 +25,7 @@ test "create context" {
 }
 
 test "global" {
-    var rt = try Runtime.init(std.testing.allocator);
+    var rt = try Runtime.init(std.testing.allocator, std.testing.io);
     defer rt.deinit();
 
     const ctx = try rt.newContext();
@@ -43,7 +43,7 @@ test "global" {
 }
 
 test "eval" {
-    var rt = try Runtime.init(std.testing.allocator);
+    var rt = try Runtime.init(std.testing.allocator, std.testing.io);
     defer rt.deinit();
 
     const ctx = try rt.newContext();
@@ -61,7 +61,7 @@ test "function" {
         }
     };
 
-    var rt = try Runtime.init(std.testing.allocator);
+    var rt = try Runtime.init(std.testing.allocator, std.testing.io);
     defer rt.deinit();
 
     const ctx = try rt.newContext();
